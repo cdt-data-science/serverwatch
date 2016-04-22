@@ -1,0 +1,94 @@
+{# This simple template derives from ``base.html``. See ``base.html`` for
+   more information about template inheritance. #}
+{%- extends "base.html" %}
+
+{# Loads some of the macros included with Flask-Bootstrap. We are using the
+   utils module here to automatically render Flask's flashed messages in a
+   bootstrap friendly manner #}
+{% import "bootstrap/utils.html" as utils %}
+
+{% block head %}
+    {{super()}}
+
+    <!-- <link rel="stylesheet" href="static/amcharts/style.css" type="text/css"> -->
+    <script src="static/amcharts/amcharts.js" type="text/javascript"></script>
+    <script src="static/amcharts/pie.js" type="text/javascript"></script>
+
+{%- endblock %}
+
+{# Inside the ``content`` is where you should place most of your own stuff.
+   This will keep scripts at the page end and a navbar you add on later
+   intact. #}
+{% block content %}
+  <div class="container">
+      <div class="bs-docs-section">
+          <div class="bs-callout bs-callout-danger" id="callout-glyphicons-empty-only">
+              <h4>Cluster Stats</h4>
+              <p>
+                  These are just drawn from number of processes at the moment, not resource-utilisation. This assumes someone is using all of a node's resources.
+              </p>
+          </div>
+      </div>
+      <div class="panel panel-default">
+        <div class="panel-heading">
+          <h3 class="panel-title">Current Usage -- Users</h3>
+        </div>
+        <div class="panel-body">
+          <div id="chart_current_use" style="width: 100%; height: 300px;"></div>
+        </div>
+      </div>
+      <div class="panel panel-default">
+        <div class="panel-heading">
+          <h3 class="panel-title">Current Usage -- CDT vs. Non-CDT</h3>
+        </div>
+        <div class="panel-body">
+          <div id="chart_current_ratio" style="width: 100%; height: 300px;"></div>
+        </div>
+    </div>
+      <script>
+          var chart_user;
+          var chart_ratio;
+
+          var chart_user_data = [
+          {% for user in stats['users'] %}
+            {
+                fullname: '{{ stats['users'][user][0] }}',
+                matric: '{{ user }}',
+                use: {{ stats['current'][user] }}
+            },
+          {% endfor %}
+          ];
+
+          var chart_ratio_data = [
+              {
+                  type: 'CDT',
+                  value: {{ stats['ratio'][0] }}
+              },
+              {
+                  type: 'Non-CDT',
+                  value: {{ stats['ratio'][1] }}
+              }
+          ];
+
+          AmCharts.ready(function () {
+              chart_user = new AmCharts.AmPieChart();
+              chart_user.dataProvider = chart_user_data;
+              chart_user.titleField = "fullname";
+              chart_user.valueField = "use";
+              chart_user.outlineColor = "#FFFFFF";
+              chart_user.outlineAlpha = 0.8;
+              chart_user.outlineThickness = 2;
+              chart_user.write("chart_current_use");
+
+              chart_ratio = new AmCharts.AmPieChart();
+              chart_ratio.dataProvider = chart_ratio_data;
+              chart_ratio.titleField = "type";
+              chart_ratio.valueField = "value";
+              chart_ratio.outlineColor = "#FFFFFF";
+              chart_ratio.outlineAlpha = 0.8;
+              chart_ratio.outlineThickness = 2;
+              chart_ratio.write("chart_current_ratio");
+          });
+      </script>
+  </div>
+{%- endblock %}
