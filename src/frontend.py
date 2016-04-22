@@ -28,6 +28,12 @@ def index():
     )
 
 
+@frontend.route('/force_update')
+def force_update():
+    stats.update_stats()
+    return index()
+
+
 @frontend.route('/stats')
 def statistics():
     lstats = LocalStats(stats.get_stats())

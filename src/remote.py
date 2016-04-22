@@ -23,7 +23,6 @@ class RemoteStats(object):
     CMD_SSH = ["ssh", "-K", "-oStrictHostKeyChecking=no"]
     CMD_SSH_ID = CMD_SSH_PRIM.format
 
-    CMD_NVIDIA = "'nvidia-smi'"
     CMD_NVIDIA_UTIL = "'nvidia-smi -q'"
     CMD_PS = "'ps -eo pcpu,pid,user,args --no-headers| sort -t. -nk1,2 -k4,4 -r | head -n 5'"
     CMD_W = "'w'"
@@ -113,24 +112,6 @@ class RemoteStats(object):
 
         return parsed
 
-    def __update_gpu_ram(self, server_name):
-        cmd_gpu = self.CMD_SSH[:]
-        cmd_gpu.append(self.CMD_SSH_ID(server_name))
-        cmd_gpu.append(self.CMD_NVIDIA)
-
-        gpu_data = self.__run_shell(cmd_gpu).split('\n')
-        parsed = []
-
-        for line in gpu_data:
-            result = self.PATTERN_NVIDA.findall(line)
-
-            if result:
-                d = [int(x) for x in result]
-                d.append(int(ceil((float(d[0])/d[1])*100)))
-                parsed.append(d)
-
-        self._stats[server_name][self.KEY_GPU] = parsed
-
     def __commit_gpu_data(self, server_name, model, ram_used, ram_total, ram_pc, utilization):
         if self.KEY_GPU_INFO not in self._stats[server_name]:
             self._stats[server_name][self.KEY_GPU_INFO] = []
@@ -201,7 +182,6 @@ class RemoteStats(object):
                     server_name = "{}{:02d}".format(k, v_i)
 
                     if k == 'charles':
-                        # self.__update_gpu_ram(server_name)
                         self.__update_gpu_info(server_name)
 
                     self.__update_cpu_processes(server_name)
