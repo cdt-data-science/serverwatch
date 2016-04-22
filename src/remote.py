@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import subprocess
 from os import getenv, popen
 import re
@@ -18,11 +18,13 @@ class RemoteStats(object):
 
     KEY_GPU = 'gpu'
     KEY_CPU = 'cpu'
+    KEY_GPU_INFO = 'gpuinfo'
 
     CMD_SSH = ["ssh", "-K", "-oStrictHostKeyChecking=no"]
     CMD_SSH_ID = CMD_SSH_PRIM.format
 
     CMD_NVIDIA = "'nvidia-smi'"
+    CMD_NVIDIA_UTIL = "'nvidia-smi -q'"
     CMD_PS = "'ps -eo pcpu,pid,user,args --no-headers| sort -t. -nk1,2 -k4,4 -r | head -n 5'"
     CMD_W = "'w'"
     CMD_FINGER = "'finger {}'".format
@@ -34,6 +36,8 @@ class RemoteStats(object):
     IDX_TOP_MEM = 9
     IDX_TOP_TIME = 10
     IDX_TOP_CMD = 11
+
+    TUPLE_GPU = namedtuple('GPUInfo', ['model', 'ram_used', 'ram_total', 'ram_pc', 'utilization'])
 
     PATTERN_NVIDA = re.compile(r"(\d+)(?=MiB.*\%)")
 
@@ -109,6 +113,82 @@ class RemoteStats(object):
 
         return parsed
 
+    def __update_gpu_ram(self, server_name):
+        cmd_gpu = self.CMD_SSH[:]
+        cmd_gpu.append(self.CMD_SSH_ID(server_name))
+        cmd_gpu.append(self.CMD_NVIDIA)
+
+        gpu_data = self.__run_shell(cmd_gpu).split('\n')
+        parsed = []
+
+        for line in gpu_data:
+            result = self.PATTERN_NVIDA.findall(line)
+
+            if result:
+                d = [int(x) for x in result]
+                d.append(int(ceil((float(d[0])/d[1])*100)))
+                parsed.append(d)
+
+        self._stats[server_name][self.KEY_GPU] = parsed
+
+    def __commit_gpu_data(self, server_name, model, ram_used, ram_total, ram_pc, utilization):
+        if self.KEY_GPU_INFO not in self._stats[server_name]:
+            self._stats[server_name][self.KEY_GPU_INFO] = []
+
+        self._stats[server_name][self.KEY_GPU_INFO].append(
+            self.TUPLE_GPU(model, ram_used, ram_total, ram_pc, utilization)
+        )
+
+    def __update_gpu_info(self, server_name):
+        cmd_gpu = self.CMD_SSH[:]
+        cmd_gpu.append(self.CMD_SSH_ID(server_name))
+        cmd_gpu.append(self.CMD_NVIDIA_UTIL)
+        gpu_data = self.__run_popen(cmd_gpu).split('\n')
+
+        delim = ' : '
+        parsed = []
+
+        found_gpu = False
+        found_product = False
+        found_fb = False
+        found_utilization = False
+
+        derived = {}
+
+        for line in gpu_data:
+            line = line.strip()
+
+            if not found_gpu and line.startswith('GPU'):
+                found_gpu = True
+            elif not found_product and line.startswith('Product Name'):
+                found_product = True
+                derived['model'] = line.split(delim)[1]
+            elif not found_fb and line.startswith('FB Memory Usage'):
+                found_fb = True
+            elif found_fb and line.startswith('Total') and 'ram_total' not in derived:
+                derived['ram_total'] = int(line.split(delim)[1].split()[0])
+            elif found_fb and line.startswith('Used') and 'ram_pc' not in derived:
+                derived['ram_used'] = int(line.split(delim)[1].split()[0])
+                derived['ram_pc'] = int(ceil((float(derived['ram_used'])/derived['ram_total'])*100))
+            elif not found_utilization and line.startswith('Utilization'):
+                found_utilization = True
+            elif found_utilization and line.startswith('Gpu'):
+                derived['utilization'] = int(line.split(delim)[1].split()[0])
+            elif found_utilization and line.startswith('Memory'):
+                self.__commit_gpu_data(server_name, **derived)
+                derived.clear()
+                found_fb = found_gpu = found_product = found_utilization = False
+
+    def __update_cpu_processes(self, server_name):
+        cmd_cpu = self.CMD_SSH[:]
+        cmd_cpu.append(self.CMD_SSH_ID(server_name))
+        cmd_cpu.append(self.CMD_TOP)
+
+        cpu_data = self.__run_popen(cmd_cpu).split('\n')[7:]
+        cpu_data = self._process_cpu_data(cpu_data)
+
+        self._stats[server_name][self.KEY_CPU] = cpu_data
+
     def update_stats(self):
         self.save_stats()
         self._stats.clear()
@@ -121,31 +201,10 @@ class RemoteStats(object):
                     server_name = "{}{:02d}".format(k, v_i)
 
                     if k == 'charles':
-                        cmd_gpu = self.CMD_SSH[:]
-                        cmd_gpu.append(self.CMD_SSH_ID(server_name))
-                        cmd_gpu.append(self.CMD_NVIDIA)
+                        # self.__update_gpu_ram(server_name)
+                        self.__update_gpu_info(server_name)
 
-                        gpu_data = self.__run_shell(cmd_gpu).split('\n')
-                        parsed = []
-
-                        for line in gpu_data:
-                            result = self.PATTERN_NVIDA.findall(line)
-
-                            if result:
-                                d = [int(x) for x in result]
-                                d.append(int(ceil((float(d[0])/d[1])*100)))
-                                parsed.append(d)
-
-                        self._stats[server_name][self.KEY_GPU] = parsed
-
-                    cmd_cpu = self.CMD_SSH[:]
-                    cmd_cpu.append(self.CMD_SSH_ID(server_name))
-                    cmd_cpu.append(self.CMD_TOP)
-
-                    cpu_data = self.__run_popen(cmd_cpu).split('\n')[7:]
-                    cpu_data = self._process_cpu_data(cpu_data)
-
-                    self._stats[server_name][self.KEY_CPU] = cpu_data
+                    self.__update_cpu_processes(server_name)
 
         self._last_update = datetime.now()
 
@@ -154,7 +213,7 @@ class RemoteStats(object):
             json.dump(self._stats, fp)
 
     def should_update(self):
-        if len(self._stats.keys()) == 0:
+        if len(self._stats.keys()) == 0 or self._last_update is None:
             return True
 
         delta = datetime.now() - self._last_update
