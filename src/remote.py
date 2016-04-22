@@ -1,17 +1,130 @@
 #!/usr/bin/python
 
-from collections import defaultdict, namedtuple
-import subprocess
-from os import getenv, popen
-import re
-from math import ceil
 import json
+import subprocess
+import re
+import multiprocessing as mp
+
+from collections import defaultdict
+from os import getenv, popen
+from math import ceil
 from datetime import datetime
 
 
 USER = getenv('DICE_USER', None)
 CMD_SSH_PRIM = USER + "@{}"
 PATH_DATA = '/home/matt/documents/serverwatch/data/'
+
+class GPUInfo(dict):
+
+    def __init__(self, model, ram_used, ram_total, ram_pc, utilization):
+        self['model'] = model
+        self['ram_used'] = ram_used
+        self['ram_total'] = ram_total
+        self['ram_pc'] = ram_pc
+        self['utilization'] = utilization
+
+    @property
+    def model(self):
+        return self['model']
+
+    @property
+    def ram_used(self):
+        return self['ram_used']
+
+    @property
+    def ram_total(self):
+        return self['ram_total']
+
+    @property
+    def ram_pc(self):
+        return self['ram_pc']
+
+    @property
+    def utilization(self):
+        return self['utilization']
+        
+
+def run_shell(cmd):
+    return subprocess.check_output(cmd)
+
+
+def run_popen(cmd):
+    pro = popen(" ".join(cmd))
+    pre = pro.read()
+    pro.close()
+
+    return pre
+
+
+def query_server_cpu(server_name):
+    cmd_cpu = RemoteStats.CMD_SSH[:]
+    cmd_cpu.append(RemoteStats.CMD_SSH_ID(server_name))
+    cmd_cpu.append(RemoteStats.CMD_TOP)
+
+    return run_popen(cmd_cpu).split('\n')[7:]
+
+
+def query_server_gpu(server_name):
+    cmd_gpu = RemoteStats.CMD_SSH[:]
+    cmd_gpu.append(RemoteStats.CMD_SSH_ID(server_name))
+    cmd_gpu.append(RemoteStats.CMD_NVIDIA_UTIL)
+    gpu_data = run_popen(cmd_gpu).split('\n')
+
+    delim = ' : '
+    parsed = []
+
+    def commit_gpu_data(server_name, model, ram_used, ram_total, ram_pc, utilization):
+        parsed.append(
+            GPUInfo(model, ram_used, ram_total, ram_pc, utilization)
+        )
+
+    found_gpu = False
+    found_product = False
+    found_fb = False
+    found_utilization = False
+
+    derived = {}
+
+    for line in gpu_data:
+        line = line.strip()
+
+        if not found_gpu and line.startswith('GPU'):
+            found_gpu = True
+        elif not found_product and line.startswith('Product Name'):
+            found_product = True
+            derived['model'] = line.split(delim)[1]
+        elif not found_fb and line.startswith('FB Memory Usage'):
+            found_fb = True
+        elif found_fb and line.startswith('Total') and 'ram_total' not in derived:
+            derived['ram_total'] = int(line.split(delim)[1].split()[0])
+        elif found_fb and line.startswith('Used') and 'ram_pc' not in derived:
+            derived['ram_used'] = int(line.split(delim)[1].split()[0])
+            derived['ram_pc'] = int(ceil((float(derived['ram_used'])/derived['ram_total'])*100))
+        elif not found_utilization and line.startswith('Utilization'):
+            found_utilization = True
+        elif found_utilization and line.startswith('Gpu'):
+            derived['utilization'] = int(line.split(delim)[1].split()[0])
+        elif found_utilization and line.startswith('Memory'):
+            commit_gpu_data(server_name, **derived)
+            derived.clear()
+            found_fb = found_gpu = found_product = found_utilization = False
+
+    return parsed
+
+
+SERVER_TYPES = {
+    'gpu': query_server_gpu,
+    'cpu': query_server_cpu
+}
+
+
+def query_servers(tasks, results):
+    for t in iter(tasks.get, None):
+        server_name, f_type = t
+        f_ptr = SERVER_TYPES[f_type]
+        res = f_ptr(server_name)
+        results.put([server_name, f_type, res])
 
 
 class RemoteStats(object):
@@ -36,16 +149,12 @@ class RemoteStats(object):
     IDX_TOP_TIME = 10
     IDX_TOP_CMD = 11
 
-    TUPLE_GPU = namedtuple('GPUInfo', ['model', 'ram_used', 'ram_total', 'ram_pc', 'utilization'])
-
-    PATTERN_NVIDA = re.compile(r"(\d+)(?=MiB.*\%)")
-
     INTERVAL = 15 * 60
 
     SERVERS = {
         'charles': range(1, 11),
-        # 'james': range(1, 22),
-        # 'mary': None
+        'james': range(1, 22),
+        'mary': None
     }
 
     def __init__(self):
@@ -53,16 +162,14 @@ class RemoteStats(object):
         self._users = {}
         self._cdt_users = {}
         self._last_update = None
+        self._all_servers = []
 
-    def __run_shell(self, cmd):
-        return subprocess.check_output(cmd)
-
-    def __run_popen(self, cmd):
-        pro = popen(" ".join(cmd))
-        pre = pro.read()
-        pro.close()
-
-        return pre
+        for k, v in self.SERVERS.iteritems():
+            if v is None:
+                self._all_servers.append(k)
+            else:
+                for v_i in v:
+                    self._all_servers.append("{}{:02d}".format(k, v_i))
 
     def _finger_user(self, user):
         if user not in self._users:
@@ -70,7 +177,7 @@ class RemoteStats(object):
             cmd_finger.append(self.CMD_SSH_ID('staff.compute'))
             cmd_finger.append(self.CMD_FINGER(user))
 
-            data = self.__run_popen(cmd_finger).split('\n')[0].split('Name:')[1]
+            data = run_popen(cmd_finger).split('\n')[0].split('Name:')[1]
 
             username = data.strip()
             self._users[user] = username
@@ -83,7 +190,7 @@ class RemoteStats(object):
             cmd_groups.append(self.CMD_SSH_ID('staff.compute'))
             cmd_groups.append(self.CMD_GROUPS(user))
 
-            data = self.__run_popen(cmd_groups)
+            data = run_popen(cmd_groups)
 
             self._cdt_users[user] = 'cdt' in data
 
@@ -112,79 +219,65 @@ class RemoteStats(object):
 
         return parsed
 
-    def __commit_gpu_data(self, server_name, model, ram_used, ram_total, ram_pc, utilization):
-        if self.KEY_GPU_INFO not in self._stats[server_name]:
-            self._stats[server_name][self.KEY_GPU_INFO] = []
-
-        self._stats[server_name][self.KEY_GPU_INFO].append(
-            self.TUPLE_GPU(model, ram_used, ram_total, ram_pc, utilization)
-        )
-
     def __update_gpu_info(self, server_name):
-        cmd_gpu = self.CMD_SSH[:]
-        cmd_gpu.append(self.CMD_SSH_ID(server_name))
-        cmd_gpu.append(self.CMD_NVIDIA_UTIL)
-        gpu_data = self.__run_popen(cmd_gpu).split('\n')
-
-        delim = ' : '
-        parsed = []
-
-        found_gpu = False
-        found_product = False
-        found_fb = False
-        found_utilization = False
-
-        derived = {}
-
-        for line in gpu_data:
-            line = line.strip()
-
-            if not found_gpu and line.startswith('GPU'):
-                found_gpu = True
-            elif not found_product and line.startswith('Product Name'):
-                found_product = True
-                derived['model'] = line.split(delim)[1]
-            elif not found_fb and line.startswith('FB Memory Usage'):
-                found_fb = True
-            elif found_fb and line.startswith('Total') and 'ram_total' not in derived:
-                derived['ram_total'] = int(line.split(delim)[1].split()[0])
-            elif found_fb and line.startswith('Used') and 'ram_pc' not in derived:
-                derived['ram_used'] = int(line.split(delim)[1].split()[0])
-                derived['ram_pc'] = int(ceil((float(derived['ram_used'])/derived['ram_total'])*100))
-            elif not found_utilization and line.startswith('Utilization'):
-                found_utilization = True
-            elif found_utilization and line.startswith('Gpu'):
-                derived['utilization'] = int(line.split(delim)[1].split()[0])
-            elif found_utilization and line.startswith('Memory'):
-                self.__commit_gpu_data(server_name, **derived)
-                derived.clear()
-                found_fb = found_gpu = found_product = found_utilization = False
+        self._stats[server_name][self.KEY_GPU_INFO] = query_server_gpu(server_name)
 
     def __update_cpu_processes(self, server_name):
-        cmd_cpu = self.CMD_SSH[:]
-        cmd_cpu.append(self.CMD_SSH_ID(server_name))
-        cmd_cpu.append(self.CMD_TOP)
+        self._stats[server_name][self.KEY_CPU] = self._process_cpu_data(query_server_cpu(server_name))
 
-        cpu_data = self.__run_popen(cmd_cpu).split('\n')[7:]
-        cpu_data = self._process_cpu_data(cpu_data)
+    def update_stats_dist(self):
+        tasks = mp.Queue()
+        results = mp.JoinableQueue()
+        interim = []
+        args = (tasks, results)
+        n_procs = mp.cpu_count()
+        all_jobs = []
 
-        self._stats[server_name][self.KEY_CPU] = cpu_data
+        for server_name in self._all_servers:
+            if server_name.startswith('charles'):
+                all_jobs.append((server_name, 'gpu'))
 
-    def update_stats(self):
+            all_jobs.append((server_name, 'cpu'))
+
+        for job in all_jobs:
+            tasks.put(job)
+
+        for _ in range(n_procs):
+            p = mp.Process(target=query_servers, args=args).start()
+
+        for _ in range(len(all_jobs)):
+            interim.append(results.get())
+            results.task_done()
+
+        for _ in range(n_procs):
+            tasks.put(None)
+
+        results.join()
+        tasks.close()
+        results.close()
+
+        # Now interim will be like {server_name, f_type, res}
+        # e.g. {'charles01', 'gpu', ...}
+        # 'cpu' will need parsing, 'gpu' is pre-parsed
+
+        for server_name, f_type, result in interim:
+            if f_type == 'gpu':
+                self._stats[server_name][self.KEY_GPU_INFO] = result
+            else:
+                self._stats[server_name][self.KEY_CPU] = self._process_cpu_data(result)
+
+    def update_stats(self, use_mp=True):
         self.save_stats()
         self._stats.clear()
 
-        for k, v in self.SERVERS.iteritems():
-            if v is None:
-                pass
-            else:
-                for v_i in v:
-                    server_name = "{}{:02d}".format(k, v_i)
+        if use_mp:
+            self.update_stats_dist()
+        else:
+            for server_name in self._all_servers:
+                if server_name.startswith('charles'):
+                    self.__update_gpu_info(server_name)
 
-                    if k == 'charles':
-                        self.__update_gpu_info(server_name)
-
-                    self.__update_cpu_processes(server_name)
+                self.__update_cpu_processes(server_name)
 
         self._last_update = datetime.now()
 
