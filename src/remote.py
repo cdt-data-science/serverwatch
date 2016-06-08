@@ -13,7 +13,7 @@ from datetime import datetime
 
 USER = getenv('DICE_USER', None)
 CMD_SSH_PRIM = USER + "@{}"
-PATH_DATA = '/home/matt/documents/serverwatch/data/'
+PATH_DATA = '/home/james/git/serverwatch/data/'
 
 class GPUInfo(dict):
 
@@ -176,12 +176,12 @@ class RemoteStats(object):
             cmd_finger = self.CMD_SSH[:]
             cmd_finger.append(self.CMD_SSH_ID('staff.compute'))
             cmd_finger.append(self.CMD_FINGER(user))
-
-            data = run_popen(cmd_finger).split('\n')[0].split('Name:')[1]
-
-            username = data.strip()
+            data = run_popen(cmd_finger)
+            try:
+                username = data.split('\n')[0].split('Name:')[1].strip()
+            except IndexError:
+                username = 'Unknown (System)'
             self._users[user] = username
-
         return self._users[user]
 
     def _is_cdt_user(self, user):
